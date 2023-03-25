@@ -390,8 +390,8 @@ def main():
             ),
         )
     
-    train_labels = [1, 2, 3, 4]
-    # train_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    # train_labels = [1, 2, 3, 4]
+    train_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     train_indices = torch.isin(train_dataset.targets, torch.Tensor(train_labels)).nonzero().squeeze()
     train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
