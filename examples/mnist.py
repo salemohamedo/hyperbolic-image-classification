@@ -179,9 +179,9 @@ class Net(nn.Module):
         self.conv2 = nn.Conv2d(20, 50, 5, 1)
         self.fc1 = nn.Linear(4 * 4 * 50, 500)
         self.fc2 = nn.Linear(500, args.dim)
-        self.tp = hypnn.ToPoincare(
-            c=args.c, train_x=args.train_x, train_c=args.train_c, ball_dim=args.dim
-        )
+        # self.tp = hypnn.ToPoincare(
+        #     c=args.c, train_x=args.train_x, train_c=args.train_c, ball_dim=args.dim
+        # )
         self.linear = args.linear
         if self.linear:
             self.mlr = nn.Linear(args.dim, 10)
@@ -198,8 +198,10 @@ class Net(nn.Module):
         x = x.view(-1, 4 * 4 * 50)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        hyp_x = self.tp(x)
-        origin_dist = pmath.dist0(hyp_x, c=self.tp.c)
+        # hyp_x = self.tp(x)
+        # origin_dist = pmath.dist0(hyp_x, c=self.tp.c)
+        hyp_x = None
+        origin_dist = None
         if self.linear:
             return F.log_softmax(self.mlr(x), dim=-1), origin_dist, hyp_x
         else:
@@ -246,34 +248,34 @@ def test(args, model, device, test_loader, epoch, train_labels):
                 dim=1, keepdim=True
             )  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
-            for label in test_loader.dataset.targets.unique():
-                label_stats = origin_dist[target==int(label)].detach().cpu().numpy()
-                label_ls = latents[target==int(label)].detach().cpu().numpy()
-                label_dists = np.concatenate((origin_dist_stats[int(label)][0], label_stats))
-                label_latents = np.concatenate((origin_dist_stats[int(label)][1], label_ls))
-                origin_dist_stats[int(label)] = (label_dists, label_latents)
+            # for label in test_loader.dataset.targets.unique():
+            #     label_stats = origin_dist[target==int(label)].detach().cpu().numpy()
+            #     label_ls = latents[target==int(label)].detach().cpu().numpy()
+            #     label_dists = np.concatenate((origin_dist_stats[int(label)][0], label_stats))
+            #     label_latents = np.concatenate((origin_dist_stats[int(label)][1], label_ls))
+            #     origin_dist_stats[int(label)] = (label_dists, label_latents)
 
     test_loss /= len(test_loader.dataset)
 
-    for label in test_loader.dataset.targets.unique():
-        print(int(label), np.mean(origin_dist_stats[int(label)][0]))
+    # for label in test_loader.dataset.targets.unique():
+    #     print(int(label), np.mean(origin_dist_stats[int(label)][0]))
 
-    fig, ax = plt.subplots()
-    rng = np.random.default_rng(seed=0)
-    for i in range(10):
-        points = origin_dist_stats[i][1][:50]
-        # points = points[rng.integers(points.shape[0], 50, replace=False), :]
-        label = i if i in train_labels else -1
-        if label == -1:
-            ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3, c='black')
-        else:
-            ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3)
-    plt.xlim(-1.2, 1.2)
-    plt.ylim(-1.2, 1.2)
-    fig.legend()
-    name_prefix = ''.join(str(y) for y in train_labels)
-    alg_type = 'linear' if args.linear else 'hyper'
-    fig.savefig(f'tmp{name_prefix}_{alg_type}_latents_plot_{epoch}.png')
+    # fig, ax = plt.subplots()
+    # rng = np.random.default_rng(seed=0)
+    # for i in range(10):
+    #     points = origin_dist_stats[i][1][:50]
+    #     # points = points[rng.integers(points.shape[0], 50, replace=False), :]
+    #     label = i if i in train_labels else -1
+    #     if label == -1:
+    #         ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3, c='black')
+    #     else:
+    #         ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3)
+    # plt.xlim(-1.2, 1.2)
+    # plt.ylim(-1.2, 1.2)
+    # fig.legend()
+    # name_prefix = ''.join(str(y) for y in train_labels)
+    # alg_type = 'linear' if args.linear else 'hyper'
+    # fig.savefig(f'tmp{name_prefix}_{alg_type}_latents_plot_{epoch}.png')
 
     print(
         "\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
