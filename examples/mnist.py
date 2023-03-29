@@ -14,171 +14,7 @@ import hyptorch.nn as hypnn
 import hyptorch.pmath as pmath
 import wandb
 import geoopt
-from torch.nn.utils.parametrizations import spectral_norm
-
-
-class PoincarePlaneDistance(torch.nn.Module):
-    def __init__(
-            self,
-            in_features: int,
-            num_planes: int,  # out_features
-            c=1.0,
-            euclidean_inputs=True,
-            rescale_euclidean_norms_gain=None,  # rescale euclidean norms based on the dimensions per space
-            signed=True,
-            scaled=True,
-            squared=False,
-            project_input=True,
-            normal_std=None,
-            dimensions_per_space=None,
-            rescale_normal_params=False,
-            effective_softmax_rescale=None,
-            hyperbolic_representation_metric=None,
-    ):
-        super().__init__()
-        self.euclidean_inputs = euclidean_inputs
-        self.rescale_norms_gain = rescale_euclidean_norms_gain
-        self.signed = signed
-        self.scaled = scaled
-        self.squared = squared
-        self.project_input = project_input
-        self.ball = geoopt.PoincareBall(c=c)
-        self.in_features = in_features
-        self.num_planes = num_planes
-        self.rescale_normal_params = rescale_normal_params
-
-        if effective_softmax_rescale is not None:
-            if self.rescale_normal_params:
-                self.logits_multiplier = effective_softmax_rescale
-            else:
-                self.logits_multiplier = effective_softmax_rescale * 2
-        else:
-            self.logits_multiplier = 1
-
-        if dimensions_per_space is not None:
-            assert in_features % dimensions_per_space == 0
-            self.dimensions_per_space = dimensions_per_space
-            self.num_spaces = in_features // dimensions_per_space
-        else:
-            self.dimensions_per_space = self.in_features
-            self.num_spaces = 1
-
-        self.normals = nn.Parameter(torch.empty((num_planes, self.num_spaces, self.dimensions_per_space)))
-        self.bias = geoopt.ManifoldParameter(torch.zeros(num_planes, self.num_spaces, self.dimensions_per_space),
-                                             manifold=self.ball)
-
-        self.normal_std = normal_std
-        self.reset_parameters()
-
-        self.hyperbolic_representation_metric = hyperbolic_representation_metric
-        if self.hyperbolic_representation_metric is not None and self.euclidean_inputs:
-            self.hyperbolic_representation_metric.add('hyperbolic_representations')
-
-
-    def get_mean_norm(self, input):
-        if self.dimensions_per_space:
-            input_shape = input.size()
-            input_batch_dims = input_shape[:-1]
-            input_feature_dim = input_shape[-1]
-            rs_input = input.view(*input_batch_dims, input_feature_dim // self.dimensions_per_space,
-                                  self.dimensions_per_space)
-        else:
-            rs_input = input
-        return torch.norm(rs_input, p=2, dim=-1, keepdim=True).mean()
-
-    def map_to_ball(self, input):  # input bs x in_feat
-        if self.rescale_norms_gain:  # make expected tangent vector norm independent of initial dimension (approximately)
-            input = self.rescale_norms_gain * input / np.sqrt(self.dimensions_per_space)
-        return self.ball.expmap0(input, project=self.project_input)
-
-    def manual_distance(self, points, other_points):
-        dist = torch.arccosh(1 + 2 * (points - other_points).pow(2).sum(-1) / (1 - points.pow(2).sum(-1)) / (
-                    1 - other_points.pow(2).sum(-1)))
-        return dist
-
-    def distance_matrix(self, input, euclidean_inputs=True, cpu=False):
-        if euclidean_inputs:
-            input = self.map_to_ball(input)
-        input_batch_dims = input.size()[:-1]
-        input = input.view(*input_batch_dims, self.num_spaces, self.dimensions_per_space)
-        if cpu:
-            input = input.cpu()
-        distances = self.manual_distance(input.unsqueeze(0), input.unsqueeze(1))
-
-        return distances.sum(-1)
-
-    def distance_to_space(self, input, other, euclidean_inputs):
-        if euclidean_inputs:
-            input = self.map_to_ball(input)
-            other = self.map_to_ball(other)
-        input_batch_dims = input.size()[:-1]
-        input = input.view(-1, self.num_spaces, self.dimensions_per_space)
-        other = other.view(-1, self.num_spaces, self.dimensions_per_space)
-        summed_dists = self.ball.dist(x=input, y=other).sum(-1)
-        return summed_dists.view(input_batch_dims)
-
-    def forward(self, input):  # input bs x in_feat
-        input_batch_dims = input.size()[:-1]
-        input = input.view(-1, self.num_spaces, self.dimensions_per_space)
-        if self.euclidean_inputs:
-            input = self.map_to_ball(input)
-            if self.hyperbolic_representation_metric is not None:
-                self.hyperbolic_representation_metric.set(hyperbolic_representations=input)
-        input_p = input.unsqueeze(-3)  # bs x 1 x num_spaces x dim_per_space
-        if self.rescale_normal_params:
-            conformal_factor = 1 - self.bias.pow(2).sum(dim=-1)
-            a = self.normals * conformal_factor.unsqueeze(-1)
-        else:
-            a = self.normals
-        distances = self.ball.dist2plane(x=input_p, p=self.bias, a=a,
-                                         signed=self.signed, scaled=self.scaled, dim=-1)
-        if self.rescale_normal_params:
-            distances = distances * 2 / conformal_factor
-        distance = distances.sum(-1)
-        distance = distance.view(*input_batch_dims, self.num_planes)
-        return distance * self.logits_multiplier
-
-    def forward_rs(self, input):  # input bs x in_feat
-        input_batch_dims = input.size()[:-1]
-        input = input.view(-1, self.num_spaces, self.dimensions_per_space)
-        if self.euclidean_inputs:
-            input = self.map_to_ball(input)
-            if self.hyperbolic_representation_metric is not None:
-                self.hyperbolic_representation_metric.set(hyperbolic_representations=input)
-        input_p = input.unsqueeze(-3)  # bs x 1 x num_spaces x dim_per_space
-        conformal_factor = 1 - self.bias.pow(2).sum(dim=-1)
-        distances = self.ball.dist2plane(x=input_p, p=self.bias, a=self.normals * conformal_factor.unsqueeze(-1),
-                                         signed=self.signed, scaled=self.scaled, dim=-1)
-        distances = distances * 2 / conformal_factor
-        distance = distances.sum(-1)
-        distance = distance.view(*input_batch_dims, self.num_planes)
-        return distance
-
-    def extra_repr(self):
-        return (
-            "poincare_dim={num_spaces}x{dimensions_per_space} ({in_features}), "
-            "num_planes={num_planes}, "
-            .format(**self.__dict__))
-
-    @torch.no_grad()
-    def reset_parameters(self):
-        nn.init.zeros_(self.bias)
-        if self.normal_std:
-            nn.init.normal_(self.normals, std=self.normal_std)
-        else:
-            nn.init.normal_(self.normals, std=1 / np.sqrt(self.in_features))
-
-def final_weight_init_hyp_small(m):
-    if isinstance(m, PoincarePlaneDistance):
-        nn.init.normal_(m.normals.data, 1 / np.sqrt(m.in_features) * 0.01)
-        if hasattr(m.bias, 'data'):
-            m.bias.data.fill_(0.0)
-
-def apply_sn(m):
-    if isinstance(m, (nn.Conv2d, nn.Linear)):
-        return spectral_norm(m)
-    else:
-        return m
+from hyper_utils import PoincarePlaneDistance, ClipNorm, apply_sn
 
 class Net(nn.Module):
     def __init__(self, args):
@@ -187,17 +23,26 @@ class Net(nn.Module):
         self.conv2 = nn.Conv2d(20, 50, 5, 1)
         self.fc1 = nn.Linear(4 * 4 * 50, 500)
         self.fc2 = nn.Linear(500, args.dim)
-        self.tp = hypnn.ToPoincare(
-            c=args.c, train_x=args.train_x, train_c=args.train_c, ball_dim=args.dim
-        )
+        # self.tp = hypnn.ToPoincare(
+        #     c=args.c, train_x=args.train_x, train_c=args.train_c, ball_dim=args.dim
+        # )
         self.linear = args.linear
         if self.linear:
             self.mlr = nn.Linear(args.dim, 10)
         else:
-            # self.mlr = hypnn.HyperbolicMLR(ball_dim=args.dim, n_classes=10, c=args.c)
-            self.mlr = PoincarePlaneDistance(in_features=args.dim, num_planes=10)
-            # final_weight_init_hyp_small(self.mlr)
-        if not self.linear:
+            # self.clip_norm = ClipNorm(args.clip_max_norm)
+            self.poincare_affine = PoincarePlaneDistance(
+                                                 euclidean_inputs=False,
+                                                 in_features=args.dim, 
+                                                 num_planes=10, 
+                                                 c=args.c,
+                                                 rescale_euclidean_norms_gain=args.rescale_euclidean_norms_gain, 
+                                                 rescale_normal_params=False,
+                                                 effective_softmax_rescale=args.effective_softmax_rescale
+                                                 )
+            # self.mlr = nn.Sequential(self.clip_norm, self.poincare_affine)
+            self.mlr = nn.Sequential(self.poincare_affine)
+        if not self.linear and not args.no_spectral_norm:
             for m in self.modules():
                 apply_sn(m)
 
@@ -209,14 +54,15 @@ class Net(nn.Module):
         x = x.view(-1, 4 * 4 * 50)
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        hyp_x = self.tp(x)
-        origin_dist = pmath.dist0(hyp_x, c=self.tp.c)
+        # hyp_x = self.tp(x)
+        # origin_dist = pmath.dist0(hyp_x, c=self.tp.c)
+        hyp_x = self.poincare_affine.map_to_ball(x)
+        origin_dist = self.poincare_affine.ball.dist0(hyp_x)
         if self.linear:
             return F.log_softmax(self.mlr(x), dim=-1), origin_dist, hyp_x
         else:
-            # x = hyp_x
             # return F.log_softmax(self.mlr(x, c=self.tp.c), dim=-1), origin_dist, hyp_x
-            return F.log_softmax(self.mlr(x), dim=-1), origin_dist, hyp_x
+            return F.log_softmax(self.mlr(hyp_x), dim=-1), origin_dist, hyp_x
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
@@ -266,25 +112,26 @@ def test(args, model, device, test_loader, epoch, train_labels):
 
     test_loss /= len(test_loader.dataset)
 
+    print("\nAverage Distance to Origin Per Class\n")
     for label in test_loader.dataset.targets.unique():
-        print(int(label), np.mean(origin_dist_stats[int(label)][0]))
+        print(int(label), f'{np.mean(origin_dist_stats[int(label)][0]):.2f}')
 
-    fig, ax = plt.subplots()
-    rng = np.random.default_rng(seed=0)
-    for i in range(10):
-        points = origin_dist_stats[i][1][:50]
-        # points = points[rng.integers(points.shape[0], 50, replace=False), :]
-        label = i if i in train_labels else -1
-        if label == -1:
-            ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3, c='black')
-        else:
-            ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3)
-    plt.xlim(-1.2, 1.2)
-    plt.ylim(-1.2, 1.2)
-    fig.legend()
-    name_prefix = ''.join(str(y) for y in train_labels)
-    alg_type = 'linear' if args.linear else 'hyper'
-    fig.savefig(f'tmp{name_prefix}_{alg_type}_latents_plot_{epoch}.png')
+    # fig, ax = plt.subplots()
+    # rng = np.random.default_rng(seed=0)
+    # for i in range(10):
+    #     points = origin_dist_stats[i][1][:50]
+    #     # points = points[rng.integers(points.shape[0], 50, replace=False), :]
+    #     label = i if i in train_labels else -1
+    #     if label == -1:
+    #         ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3, c='black')
+    #     else:
+    #         ax.scatter(points[:,0], points[:,1], label=label, alpha=0.3)
+    # plt.xlim(-1.2, 1.2)
+    # plt.ylim(-1.2, 1.2)
+    # fig.legend()
+    # name_prefix = ''.join(str(y) for y in train_labels)
+    # alg_type = 'linear' if args.linear else 'hyper'
+    # fig.savefig(f'tmp{name_prefix}_{alg_type}_latents_plot_{epoch}.png')
 
     print(
         "\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
@@ -365,7 +212,7 @@ def main():
         "--c", type=float, default=1.0, help="Curvature of the Poincare ball"
     )
     parser.add_argument(
-        "--dim", type=int, default=2, help="Dimension of the Poincare ball"
+        "--dim", type=int, default=4, help="Dimension of the Poincare ball"
     )
     parser.add_argument(
         "--train_x",
@@ -378,6 +225,24 @@ def main():
         action="store_true",
         default=False,
         help="train the Poincare ball curvature",
+    )
+
+    parser.add_argument(
+        "--clip_max_norm", type=int, default=16
+    )
+
+    parser.add_argument(
+        "--effective_softmax_rescale", type=int, default=2
+    )
+
+    parser.add_argument(
+        "--rescale_euclidean_norms_gain", type=int, default=1
+    )
+
+    parser.add_argument(
+        "--no_spectral_norm",
+        action="store_true",
+        default=False,
     )
 
     args = parser.parse_args()
@@ -401,12 +266,11 @@ def main():
             ),
         )
     
-    # train_labels = [1, 2, 3, 4]
-    train_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    train_labels = [1, 2, 3, 7, 8, 9]
+    # train_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     train_indices = torch.isin(train_dataset.targets, torch.Tensor(train_labels)).nonzero().squeeze()
     train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -433,7 +297,10 @@ def main():
     if args.linear:
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
     else:
-        optimizer = geoopt.optim.RiemannianAdam(model.parameters(), lr=args.lr)
+        # optimizer = geoopt.optim.RiemannianAdam(model.parameters(), lr=args.lr)
+        optimizer = geoopt.optim.RiemannianSGD(model.parameters(), lr=args.lr, weight_decay=5e-4, momentum=0.9)
+
+    print(f"Training on classes {train_labels}, evaluating on all classes.")
 
     test(args, model, device, test_loader, epoch=0, train_labels=train_labels)
 
